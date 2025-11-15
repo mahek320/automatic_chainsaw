@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  falkordb:
+    image: falkordb/falkordb
+    container_name: falkordb
+    ports:
+      - "6380:6379"
+      - "3001:3000"
+    volumes:
+      - ./data:/var/lib/falkordb/data
+    restart: unless-stopped

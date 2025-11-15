@@ -1,0 +1,20 @@
+services:
+  connect:
+    image: quay.io/debezium/connect:3.3
+    container_name: debezium-connect
+    environment:
+      BOOTSTRAP_SERVERS: "broker:29092"
+      GROUP_ID: "1"
+      CONFIG_STORAGE_TOPIC: "connect-configs"
+      OFFSET_STORAGE_TOPIC: "connect-offsets"
+      STATUS_STORAGE_TOPIC: "connect-status"
+      KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      ENABLE_DEBEZIUM_SCRIPTING: "true"
+    ports:
+      - "8083:8083"
+    networks:
+    - kafka_default
+networks:
+   kafka_default:
+     external: true

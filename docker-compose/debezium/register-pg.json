@@ -1,0 +1,25 @@
+{
+  "name": "pg-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+
+    "database.hostname": "172.10.3.92",
+    "database.port": "5432",
+    "database.user": "postgres",
+    "database.password": "S3cret",
+    "database.dbname": "postgres",
+
+    "topic.prefix": "dbz",
+    "plugin.name": "pgoutput",
+    "slot.name": "dbz_slot",
+    "publication.autocreate.mode": "all_tables",
+    "publication.name": "dbz_publication",
+
+    "schema.include.list": "public",
+    "table.include.list": "public.customers",
+
+    "tombstones.on.delete": "false",
+    "include.schema.changes": "false"
+  }
+}
