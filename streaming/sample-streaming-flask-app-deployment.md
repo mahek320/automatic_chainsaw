@@ -15,6 +15,7 @@ def stream():
        for i in range(100):
            yield f"Chunk {i}\n"
            time.sleep(0.1)
+        yield "DONE\n" # Add this line to snd "DONE" after all chunks
    return Response(stream_with_context(generate()), content_type='text/plain', headers={
        'Cache-Control': 'no-cache',
        'X-Accel-Buffering': 'no'  # Disable proxy buffering for streaming
@@ -217,6 +218,7 @@ Chunk 4
 ...
 Chunk 98
 Chunk 99
+DONE
 ```
 *Note: Each chunk appears approximately every 0.1 seconds, demonstrating the streaming behavior.*
 
@@ -244,6 +246,7 @@ with requests.get(url, stream=True) as response:
 ...
 [9.89s] Chunk 98
 [10.01s] Chunk 99
+[10.02s] DONE
 ```
 *Note: The elapsed time shows real-time streaming with chunks arriving approximately every 0.1 seconds.*
 
