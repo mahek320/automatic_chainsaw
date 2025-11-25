@@ -1,0 +1,921 @@
+name: Github Action Azure Container App Deployment 
+
+permissions:
+ contents: read
+ issues: write
+ security-events: write
+ id-token: write
+ packages: write
+ actions: read
+ 
+on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: 'Enter the Branch name'
+        required: true
+        default: 'main'
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: development
+        type: choice
+        options:
+          - development
+          - production
+
+jobs:
+ # ============================================================================
+ # JOB 1: BUILD DOCKER IMAGE
+ # ============================================================================
+ build-image:
+  name: 🔨 Build Docker Image
+  runs-on: gha-azcapp
+  environment: ${{ github.event.inputs.environment }}
+  outputs:
+   image-tag: ${{ steps.set-outputs.outputs.image-tag }}
+   image-name: ${{ steps.set-outputs.outputs.image-name }}
+  steps:
+  # Step 1: Set image tag and name outputs
+  - name: Set image tag and name outputs
+    id: set-outputs
+    run: |
+      IMAGE_TAG="${{ github.sha }}"
+      IMAGE_NAME="${{ vars.ACR_NAME }}.azurecr.io/${{ vars.ACR_REPOSITORY }}/${{ vars.APP_NAME }}"
+      
+      echo "🔍 Setting job outputs..."
+      echo "  IMAGE_TAG: $IMAGE_TAG"
+      echo "  IMAGE_NAME: $IMAGE_NAME"
+      
+      echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+      echo "image-name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+      
+      echo "✅ Outputs set successfully"
+  
+  # Step 2: Checkout source code from repository
+  - name: Checkout source code from repository
+    uses: actions/checkout@v4
+    with:
+      ref: ${{ github.event.inputs.branch }}
+      repository: LTIM-Fosfor/gha-azcapp
+      fetch-depth: 1
+      submodules: false
+  
+  # Step 3: Configure Docker Buildx for multi-platform builds
+  - name: Configure Docker Buildx for multi-platform builds
+    uses: docker/setup-buildx-action@v3
+    with:
+      driver-opts: |
+        image=moby/buildkit:latest
+        network=host
+  
+  # Step 4: Authenticate to Azure using OIDC
+  - name: Authenticate to Azure using OIDC
+    uses: azure/login@v2
+    with:
+      client-id: ${{ secrets.AZURE_CLIENT_ID }}
+      tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+      subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  
+  # Step 5: Check and create ACR if needed
+  - name: Ensure ACR exists
+    run: |
+      ACR_NAME="${{ vars.ACR_NAME }}"
+      RG_NAME="${{ secrets.AZURE_RESOURCE_GROUP }}"
+      
+      echo "🔍 Checking if ACR '$ACR_NAME' exists in resource group '$RG_NAME'..."
+      
+      START_TIME=$(date +%s)
+      
+      # Check if ACR exists (returns empty string if not found)
+      ACR_EXISTS=$(az acr show \
+        --name "$ACR_NAME" \
+        --resource-group "$RG_NAME" \
+        --query name \
+        --output tsv 2>/dev/null || echo "")
+      
+      END_TIME=$(date +%s)
+      CHECK_DURATION=$((END_TIME - START_TIME))
+      
+      if [ -z "$ACR_EXISTS" ]; then
+        echo "⚠️  ACR '$ACR_NAME' not found. Creating ACR..."
+        echo "⏱️  This may take 30-60 seconds..."
+        
+        CREATE_START=$(date +%s)
+        
+        az acr create \
+          --name "$ACR_NAME" \
+          --resource-group "$RG_NAME" \
+          --sku Basic \
+          --admin-enabled true \
+          --output none
+        
+        CREATE_END=$(date +%s)
+        CREATE_DURATION=$((CREATE_END - CREATE_START))
+        
+        echo "✅ ACR '$ACR_NAME' created successfully in ${CREATE_DURATION}s"
+      else
+        echo "✅ ACR '$ACR_EXISTS' already exists (check took ${CHECK_DURATION}s)"
+      fi
+      
+  # Step 6: Check and create ACR repository if needed
+  - name: Ensure ACR repository exists
+    run: |
+      REPOSITORY="${{ vars.ACR_REPOSITORY }}/${{ vars.APP_NAME }}"
+      echo "🔍 Checking if ACR repository '$REPOSITORY' exists in ${{ vars.ACR_NAME }}..."
+      
+      # List all repositories and check if ours exists
+      REPO_EXISTS=$(az acr repository list --name ${{ vars.ACR_NAME }} --output tsv 2>/dev/null | grep -x "$REPOSITORY" || echo "")
+      
+      if [ -z "$REPO_EXISTS" ]; then
+        echo "⚠️ Repository '$REPOSITORY' does not exist in ACR"
+        echo "ℹ️  Repository will be automatically created when first image is pushed"
+        echo "✅ No manual intervention needed - proceeding with build"
+      else
+        echo "✅ Repository '$REPOSITORY' already exists in ACR"
+      fi
+      
+      echo "📝 Repository path: ${{ vars.ACR_NAME }}.azurecr.io/$REPOSITORY"
+      
+  # Step 7: Authenticate to Azure Container Registry
+  - name: Authenticate to Azure Container Registry
+    run: |
+      REGISTRY_NAME="${{ vars.ACR_NAME }}"
+      az acr login --name $REGISTRY_NAME
+      pwd
+  
+  # Step 8: Extract metadata for Docker
+  - name: Extract Docker image metadata and tags
+    id: meta
+    uses: docker/metadata-action@v5
+    with:
+      images: ${{ steps.set-outputs.outputs.image-name }}
+      tags: |
+        type=sha,prefix={{branch}}
+        type=ref,event=branch
+        type=ref,event=pr
+        type=semver,pattern={{version}}
+        type=semver,pattern={{major}}.{{minor}}
+        type=raw,value=latest,enable={{is_default_branch}}
+        
+  # Step 9: Build Docker image
+  - name: Build Docker image with Buildx
+    run: |
+      IMAGE_NAME="${{ steps.set-outputs.outputs.image-name }}"
+      IMAGE_TAG="${{ steps.set-outputs.outputs.image-tag }}"
+      echo "Building image: $IMAGE_NAME:$IMAGE_TAG"
+      docker image build -t $IMAGE_NAME:$IMAGE_TAG .
+      
+  # Step 10: Save Docker image as artifact
+  - name: Save Docker image as artifact
+    run: |
+      IMAGE_NAME="${{ steps.set-outputs.outputs.image-name }}"
+      IMAGE_TAG="${{ steps.set-outputs.outputs.image-tag }}"
+      mkdir -p docker-image
+      docker image save $IMAGE_NAME:$IMAGE_TAG -o docker-image/image.tar
+      echo "✅ Image saved to artifact"
+      
+  # Step 11: Upload Docker image as workflow artifact
+  - name: Upload Docker image as workflow artifact
+    uses: actions/upload-artifact@v4
+    with:
+      name: docker-image
+      path: docker-image/
+      retention-days: 1
+
+ # ============================================================================
+ # JOB 2: SCAN DOCKER IMAGE
+ # ============================================================================
+ scan-image:
+  name: 🔍 Scan Docker Image
+  runs-on: gha-azcapp
+  needs: build-image
+  environment: ${{ github.event.inputs.environment }}
+  env:
+    IMAGE_NAME: ${{ needs.build-image.outputs.image-name }}
+    IMAGE_TAG: ${{ needs.build-image.outputs.image-tag }}
+  steps:
+  - name: Download Docker image artifact
+    uses: actions/download-artifact@v4
+    with:
+      name: docker-image
+      path: docker-image/
+      
+  - name: Load Docker image into daemon
+    run: |
+      docker image load -i docker-image/image.tar
+      
+  # Step 3: Install Trivy vulnerability scanner
+  - name: Install Trivy vulnerability scanner
+    run: |
+      wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+      echo deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main | sudo tee -a /etc/apt/sources.list.d/trivy.list
+      sudo apt-get update
+      sudo apt-get install -y trivy
+      
+  # Step 4: Run Trivy vulnerability scanner
+  - name: Run Trivy vulnerability scanner
+    id: scan
+    continue-on-error: true
+    run: |
+      # Create reports directory
+      mkdir -p trivy-reports
+      
+      # Run Trivy scan with multiple output formats
+      trivy image ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} | grep -i Total > total-count.txt
+      
+      trivy image ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+        --format json \
+        --output trivy-reports/trivy-full-report.json 
+      
+      trivy image ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+        --severity ${{ vars.TRIVY_SEVERITY_THRESHOLD }} \
+        --format json \
+        --output trivy-reports/trivy-report.json 
+        
+      trivy image ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+        --severity ${{ vars.TRIVY_SEVERITY_THRESHOLD }} \
+        --format sarif \
+        --output trivy-reports/trivy-report.sarif
+        
+      trivy image ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+        --severity ${{ vars.TRIVY_SEVERITY_THRESHOLD }} \
+        --format table \
+        --output trivy-reports/trivy-report.txt
+        
+      # Generate HTML report for easy viewing
+      trivy image ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+        --severity ${{ vars.TRIVY_SEVERITY_THRESHOLD }} \
+        --format template \
+        --template "@/usr/local/share/trivy/templates/html.tpl" \
+        --output trivy-reports/trivy-report.html
+        
+      # Check scan exit code
+      SCAN_EXIT_CODE=$?
+      echo "scan-exit-code=$SCAN_EXIT_CODE" >> $GITHUB_OUTPUT
+      # Count vulnerabilities by severity
+      CRITICAL=$(grep -oP 'CRITICAL: \K\d+' total-count.txt | paste -sd+ - | bc)
+      HIGH=$(grep -oP 'HIGH: \K\d+' total-count.txt | paste -sd+ - | bc)
+      MEDIUM=$(grep -oP 'MEDIUM: \K\d+' total-count.txt | paste -sd+ - | bc)
+      LOW=$(grep -oP 'LOW: \K\d+' total-count.txt | paste -sd+ - | bc)
+      echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+      echo "high=$HIGH" >> $GITHUB_OUTPUT
+      echo "medium=$MEDIUM" >> $GITHUB_OUTPUT
+      echo "low=$LOW" >> $GITHUB_OUTPUT
+      echo "### Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+      echo "- **Critical**: $CRITICAL" >> $GITHUB_STEP_SUMMARY
+      echo "- **High**: $HIGH" >> $GITHUB_STEP_SUMMARY
+      echo "- **Medium**: $MEDIUM" >> $GITHUB_STEP_SUMMARY
+      echo "- **Low**: $LOW" >> $GITHUB_STEP_SUMMARY
+      
+  # Step 5: Cleanup Docker image from runner
+  - name: Cleanup Docker image from runner
+    run: |
+      docker image rm -f ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+
+  # Step 6: Upload Trivy scan results as artifacts
+  - name: Upload Trivy scan reports as artifacts
+    uses: actions/upload-artifact@v4
+    if: always()
+    with:
+      name: trivy-scan-results
+      path: trivy-reports/
+      retention-days: 1
+    continue-on-error: true
+  
+  # Step 7: Upload SARIF to GitHub Security tab
+  - name: Upload SARIF report to GitHub Security tab
+    uses: github/codeql-action/upload-sarif@v4
+    if: always()
+    with:
+      sarif_file: trivy-reports/trivy-report.sarif
+      category: container-security
+    continue-on-error: true
+  
+  # Step 8: Format vulnerability report for GitHub issue
+  - name: Format vulnerability report for GitHub issue
+    id: format_report
+    shell: bash
+    run: |
+      set -euo pipefail
+      python3 - <<'PY'
+      import json
+      import os
+      from datetime import datetime
+      report_path = "trivy-reports/trivy-full-report.json"
+      with open(report_path, "r", encoding="utf-8") as handle:
+          report = json.load(handle)
+      entries = []
+      for result in report.get("Results", []):
+          for vuln in result.get("Vulnerabilities", []) or []:
+              entries.append({
+                  "severity": vuln.get("Severity", "UNKNOWN"),
+                  "id": vuln.get("VulnerabilityID", "N/A"),
+                  "pkg": vuln.get("PkgName", "N/A"),
+                  "version": vuln.get("InstalledVersion", "N/A"),
+                  "fixed": vuln.get("FixedVersion") or "None",
+                  "title": vuln.get("Title") or (vuln.get("Description", "")[:80]),
+                  "source": result.get("Target", "image"),
+                  "cvss": vuln.get("CVSS", {})
+              })
+      build_number = os.environ.get("GITHUB_RUN_NUMBER", "unknown")
+      commit_sha = os.environ.get("GITHUB_SHA", "unknown")
+      short_sha = os.environ.get("SHORT_SHA") or commit_sha[:7]
+      generated = os.environ.get("DATE_TAG") or f"{datetime.utcnow().isoformat()}Z"
+      image_name = os.environ.get("IMAGE_NAME", "unknown")  # safer than os.environ['IMAGE_NAME']
+      header = [
+          f"# Trivy Scan Report - Build #{build_number}",
+          f"Commit: {commit_sha}",
+          f"Generated: {generated}",
+          "",
+          f"Image: {image_name}",
+          "",
+      ]
+      if not entries:
+          body = "\n".join(header + ["No vulnerabilities were found in this scan."])
+      else:
+          severity_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
+          lines = header[:]
+          for severity in severity_order:
+              items = [e for e in entries if e["severity"] == severity]
+              if not items:
+                  continue
+              lines.append(f"## {severity} ({len(items)})")
+              lines.append("| ID | Package | Installed | Fixed | Title | Source |")
+              lines.append("| --- | --- | --- | --- | --- | --- |")
+              for item in items:
+                  lines.append(
+                      f"| {item['id']} | {item['pkg']} | {item['version']} | {item['fixed']} | "
+                      f"{item['title']} | {item['source']} |"
+                  )
+              lines.append("")
+          body = "\n".join(lines)
+      issue_file = "issue_body.md"
+      with open(issue_file, "w", encoding="utf-8") as output:
+          output.write(body)
+      delimiter = "EOF_ISSUE_BODY"
+      with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as gh_output:
+          gh_output.write(f"body<<{delimiter}\n")
+          gh_output.write(body)
+          gh_output.write(f"\n{delimiter}\n")
+      PY
+  
+  # Step 9: Create GitHub issue with vulnerability report
+  - name: Create GitHub issue with vulnerability report
+    uses: actions/github-script@v7
+    env:
+      ISSUE_BODY: ${{ steps.format_report.outputs.body }}
+      ISSUE_LABEL: ${{ env.ISSUE_LABEL }}
+    with:
+      script: |
+        const body = process.env.ISSUE_BODY;
+        const { owner, repo } = context.repo;
+        const label = process.env.ISSUE_LABEL;
+        const shortSha = process.env.SHORT_SHA || context.sha.substring(0, 7);
+        const titleBase = process.env.REPORT_TITLE || `Trivy Scan Report - Build #${process.env.GITHUB_RUN_NUMBER} (${shortSha})`;
+        const dateTag = process.env.DATE_TAG ? ` (${process.env.DATE_TAG})` : '';
+        const title = `${titleBase}${dateTag}`;
+        const labels = label ? [label] : [];
+        const issue = await github.rest.issues.create({
+          owner,
+          repo,
+          title,
+          body,
+          labels,
+        });
+        const issueNumber = issue.data.number;
+        core.summary.addHeading('Trivy Scan');
+        core.summary.addRaw(`Report filed as issue #${issueNumber} for build #${process.env.GITHUB_RUN_NUMBER} (SHA ${context.sha}).`);
+        core.summary.addRaw(`Image: ${process.env.IMAGE_NAME}`);
+        await core.summary.write();
+
+ # ============================================================================
+ # JOB 3: PUSH DOCKER IMAGE
+ # ============================================================================
+ push-image:
+  name: 📦 Push Docker Image
+  runs-on: gha-azcapp
+  needs: [build-image, scan-image]
+  environment: ${{ github.event.inputs.environment }}
+  env:
+    IMAGE_NAME: ${{ needs.build-image.outputs.image-name }}
+    IMAGE_TAG: ${{ needs.build-image.outputs.image-tag }}
+  steps:
+  # Step 1: Download Docker image from artifacts
+  - name: Download Docker image from artifacts
+    uses: actions/download-artifact@v4
+    with:
+      name: docker-image
+      path: docker-image/
+      
+  - name: Load Docker image into daemon
+    run: |
+      docker image load -i docker-image/image.tar
+      
+  # Step 3: Authenticate to Azure using OIDC
+  - name: Authenticate to Azure using OIDC
+    uses: azure/login@v2
+    with:
+      client-id: ${{ secrets.AZURE_CLIENT_ID }}
+      tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+      subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      
+  # Step 4: Authenticate to Azure Container Registry
+  - name: Authenticate to Azure Container Registry
+    run: |
+      REGISTRY_NAME="${{ vars.ACR_NAME }}"
+      az acr login --name $REGISTRY_NAME
+      
+  # Step 5: Push Docker image to ACR
+  - name: Push Docker image to ACR
+    run: |
+      docker image push ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+      echo "✅ Image pushed successfully: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+      
+  # Step 6: Cleanup Docker image from runner
+  - name: Cleanup Docker image from runner
+    run: |
+      docker image rm -f ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+
+ # ============================================================================
+ # JOB 4: SETUP AZURE INFRASTRUCTURE
+ # ============================================================================
+ setup-infrastructure:
+  name: ⚙️ Setup Azure Infrastructure
+  runs-on: gha-azcapp
+  needs: [build-image, push-image]
+  environment: ${{ github.event.inputs.environment }}
+  env:
+    IMAGE_NAME: ${{ needs.build-image.outputs.image-name }}
+    IMAGE_TAG: ${{ needs.build-image.outputs.image-tag }}
+  steps:
+  - name: Display image information for debugging
+    run: |
+      echo "IMAGE_NAME: ${{ env.IMAGE_NAME }}"
+      echo "IMAGE_TAG: ${{ env.IMAGE_TAG }}"
+      echo "Full image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+      
+  - name: Authenticate to Azure using OIDC
+    uses: azure/login@v2
+    with:
+      client-id: ${{ secrets.AZURE_CLIENT_ID }}
+      tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+      subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      
+  # Step 3: Ensure Container Apps Environment exists
+  - name: Ensure Container Apps Environment exists
+    run: |
+      ENV_NAME="${{ vars.CONTAINER_APP_ENVIRONMENT }}"
+      RG_NAME="${{ secrets.AZURE_RESOURCE_GROUP }}"
+      
+      echo "🔍 Checking if Container Apps Environment '$ENV_NAME' exists..."
+      
+      ENV_EXISTS=$(az containerapp env show \
+        --name "$ENV_NAME" \
+        --resource-group "$RG_NAME" \
+        --query name \
+        --output tsv 2>/dev/null || echo "")
+      
+      if [ -z "$ENV_EXISTS" ]; then
+        echo "⚠️  Container Apps Environment not found. Creating environment..."
+        echo "⏱️  This will take ~2-3 minutes..."
+        
+        START_TIME=$(date +%s)
+        
+        az containerapp env create \
+          --name "$ENV_NAME" \
+          --resource-group "$RG_NAME" \
+          --location eastus
+        
+        END_TIME=$(date +%s)
+        DURATION=$((END_TIME - START_TIME))
+        
+        echo "✅ Container Apps Environment created successfully in ${DURATION}s"
+      else
+        echo "✅ Container Apps Environment '$ENV_EXISTS' already exists (skipping creation)"
+      fi
+  
+  # Step 4: Create or update Container App
+  - name: Create or update Container App
+    run: |
+      # Append environment suffix to container app name
+      ENV_SUFFIX=$(echo "${{ github.event.inputs.environment }}" | tr '[:upper:]' '[:lower:]')
+      FULL_APP_NAME="${{ vars.CONTAINER_APP_NAME }}-${ENV_SUFFIX}"
+      REG_ID="${{ secrets.REG_ID }}"
+      REG_SER="${{ vars.ACR_NAME }}"
+      echo "Checking if Container App $FULL_APP_NAME exists..."
+      APP_EXISTS=$(az containerapp show \
+        --name $FULL_APP_NAME \
+        --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+        --query name -o tsv 2>/dev/null || echo "")
+      if [ -z "$APP_EXISTS" ]; then
+        echo "⚠ Container App not found. Creating Container App with name: $FULL_APP_NAME"
+        
+        # Create container app with multiple revision mode
+        az containerapp create \
+          --name $FULL_APP_NAME \
+          --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+          --environment ${{ vars.CONTAINER_APP_ENVIRONMENT }} \
+          --registry-identity "$REG_ID" \
+          --registry-server "$REG_SER.azurecr.io" \
+          --image ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+          --target-port 8080 \
+          --ingress external \
+          --revisions-mode multiple \
+          --query properties.configuration.ingress.fqdn
+        
+        echo "✅ Container App $FULL_APP_NAME created successfully with MULTIPLE revision mode"
+        
+        # Configure revision retention limit after creation
+        REVISION_LIMIT="${{ vars.REVISION_RETENTION_LIMIT }}"
+        if [ -z "$REVISION_LIMIT" ]; then
+          REVISION_LIMIT=6
+          echo "ℹ️ REVISION_RETENTION_LIMIT not set, using default: 6"
+        else
+          echo "📋 Revision retention limit: $REVISION_LIMIT"
+        fi
+        
+        echo "🔧 Setting revision retention limit to: $REVISION_LIMIT"
+        az containerapp update \
+          --name $FULL_APP_NAME \
+          --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+          --set properties.configuration.maxInactiveRevisions=$REVISION_LIMIT
+        
+        echo "📋 Revision limit configured (automatic cleanup enabled)"
+        echo "Assigning Permissions for app"
+        #az containerapp identity assign -n $FULL_APP_NAME -g ${{ secrets.AZURE_RESOURCE_GROUP }} --user-assigned "$REG_ID"
+        #az containerapp registry set -n $FULL_APP_NAME -g ${{ secrets.AZURE_RESOURCE_GROUP }} --server "${{ vars.ACR_NAME }}" --identity "$REG_ID"
+        echo "Permissions completed"
+      else
+        echo "✅ Container App $FULL_APP_NAME already exists"
+        
+        # Ensure it's in multiple revision mode
+        echo "🔧 Ensuring container app is in MULTIPLE revision mode..."
+        az containerapp revision set-mode \
+          --name $FULL_APP_NAME \
+          --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+          --mode multiple
+        
+        echo "✅ Revision mode set to MULTIPLE"
+        
+        az containerapp update --name $FULL_APP_NAME --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} --image ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+      fi
+  
+  # Step 5: Inject GitHub secrets into Container App
+  - name: Inject GitHub secrets into Container App
+    env:
+      SECRETS_JSON: ${{ toJSON(secrets) }}
+    run: |
+      ENV_SUFFIX=$(echo "${{ github.event.inputs.environment }}" | tr '[:upper:]' '[:lower:]')
+      FULL_APP_NAME="${{ vars.CONTAINER_APP_NAME }}-${ENV_SUFFIX}"
+      echo "total secrets:"
+      echo "$SECRETS_JSON" | jq -r 'keys[]'
+      declare -a SECRET_TOKENS=()
+      declare -a ENVVAR_TOKENS=()
+      # Iterate all secret keys available to the job
+      mapfile -t SECRET_KEYS < <(echo "$SECRETS_JSON" | jq -r 'keys[]')
+      for SECRET_NAME in "${SECRET_KEYS[@]}"; do
+       SECRET_VALUE=$(echo "$SECRETS_JSON" | jq -r --arg key "$SECRET_NAME" '.[$key] // empty')
+       if [ -z "$SECRET_VALUE" ]; then
+        echo "⚠️ Secret $SECRET_NAME not found or empty; skipping."
+        continue
+       fi
+       AZURE_SECRET_NAME=$(echo "$SECRET_NAME" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
+       ENV_VAR_NAME=$(echo "$SECRET_NAME" | tr '[:lower:]' '[:upper:]')
+       SECRET_TOKENS+=("${AZURE_SECRET_NAME}=${SECRET_VALUE}")
+       ENVVAR_TOKENS+=("${ENV_VAR_NAME}=secretref:${AZURE_SECRET_NAME}")
+       echo "✅ Mapped $SECRET_NAME → $AZURE_SECRET_NAME (env: $ENV_VAR_NAME)"
+      done
+      ENVVAR_TOKENS+=("ENVIRONMENT=${{ github.event.inputs.environment }}")
+      ENVVAR_TOKENS+=("APP_VERSION=${{ github.sha }}")
+      if [ -n "${{ vars.LOG_LEVEL }}" ]; then
+       ENVVAR_TOKENS+=("LOG_LEVEL=${{ vars.LOG_LEVEL }}")
+      fi
+      echo "📦 Secret tokens count: ${#SECRET_TOKENS[@]}"
+      echo "📦 Env var tokens count: ${#ENVVAR_TOKENS[@]}"
+      if [ "${#SECRET_TOKENS[@]}" -gt 0 ]; then
+       echo "🚀 Setting secrets in Container App…"
+       az containerapp secret set \
+        --name "$FULL_APP_NAME" \
+        --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+        --secrets "${SECRET_TOKENS[@]}"
+      echo "✅ Secrets configured."
+      else
+       echo "ℹ️ No secrets to set."
+      fi
+      if [ "${#ENVVAR_TOKENS[@]}" -gt 0 ]; then
+       echo "🔧 Setting env vars in Container App…"
+       az containerapp update \
+        --name "$FULL_APP_NAME" \
+        --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+        --set-env-vars "${ENVVAR_TOKENS[@]}"
+       echo "✅ Env vars configured."
+      else
+       echo "ℹ️ No env vars to set."
+      fi
+
+ # ============================================================================
+ # JOB 5: DEPLOY & HEALTH CHECK
+ # ============================================================================
+ deploy-and-verify:
+  name: 🚀 Deploy & Health Check
+  runs-on: gha-azcapp
+  needs: [build-image, setup-infrastructure]
+  environment: ${{ github.event.inputs.environment }}
+  env:
+    IMAGE_NAME: ${{ needs.build-image.outputs.image-name }}
+    IMAGE_TAG: ${{ needs.build-image.outputs.image-tag }}
+  steps:
+  - name: Display image information for debugging
+    run: |
+      echo "IMAGE_NAME: ${{ env.IMAGE_NAME }}"
+      echo "IMAGE_TAG: ${{ env.IMAGE_TAG }}"
+      echo "Full image: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+      
+  - name: Authenticate to Azure using OIDC
+    uses: azure/login@v2
+    with:
+      client-id: ${{ secrets.AZURE_CLIENT_ID }}
+      tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+      subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      
+  # Step 3: Wait for deployment to stabilize
+  - name: Wait for deployment to stabilize
+    run: |
+      echo "Waiting 20 seconds for deployment to active"
+      sleep 20   
+  
+  # Step 4: Retrieve Container App FQDN
+  - name: Retrieve Container App FQDN
+    id: get-url
+    run: |
+      ENV_SUFFIX=$(echo "${{ github.event.inputs.environment }}" | tr '[:upper:]' '[:lower:]')
+      FULL_APP_NAME="${{ vars.CONTAINER_APP_NAME }}-${ENV_SUFFIX}"
+      FQDN=$(az containerapp show \
+        --name $FULL_APP_NAME \
+        --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+        --query properties.configuration.ingress.fqdn \
+        --output tsv)
+      echo "fqdn=$FQDN" >> $GITHUB_OUTPUT
+      echo "Container App URL: https://$FQDN"    
+  
+  # Step 5: Perform application health check
+  - name: Perform application health check
+    id: health-check
+    run: |
+      MAX_RETRIES=10
+      RETRY_INTERVAL=10
+      HEALTH_PATH="${{ vars.HEALTH_CHECK }}"
+      
+      # Remove leading slash if present to avoid double slashes
+      HEALTH_PATH="${HEALTH_PATH#/}"
+      
+      HEALTH_URL="https://${{ steps.get-url.outputs.fqdn }}/${HEALTH_PATH}"
+      
+      echo "🏥 Starting health check..."
+      echo "📍 Health endpoint: $HEALTH_URL"
+      echo "🎯 Expected status: ${{ vars.HEALTH_CHECK_EXPECTED_STATUS }}"
+      echo ""
+      
+      for i in $(seq 1 $MAX_RETRIES); do
+        echo "🔍 Attempt $i/$MAX_RETRIES..."
+        
+        # Get HTTP status code with timeout
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$HEALTH_URL" || echo "000")
+        
+        echo "   Response: $HTTP_CODE"
+        
+        if [ "$HTTP_CODE" = "${{ vars.HEALTH_CHECK_EXPECTED_STATUS }}" ]; then
+          echo ""
+          echo "✅ Health check passed! Status code: $HTTP_CODE"
+          echo "healthy=true" >> $GITHUB_OUTPUT
+          exit 0
+        else
+          echo "   ⚠️  Expected ${{ vars.HEALTH_CHECK_EXPECTED_STATUS }}, got $HTTP_CODE"
+          
+          if [ $i -lt $MAX_RETRIES ]; then
+            echo "   ⏳ Retrying in $RETRY_INTERVAL seconds..."
+            sleep $RETRY_INTERVAL
+          fi
+        fi
+      done
+      
+      echo ""
+      echo "❌ Health check failed after $MAX_RETRIES attempts"
+      echo "🔴 Final status: $HTTP_CODE (expected: ${{ vars.HEALTH_CHECK_EXPECTED_STATUS }})"
+      echo "healthy=false" >> $GITHUB_OUTPUT
+      exit 1
+  
+  # Step 6: Execute automatic rollback to previous revision
+  - name: Execute automatic rollback to previous revision
+    if: failure() && steps.health-check.outputs.healthy == 'false'
+    run: |
+      ENV_SUFFIX=$(echo "${{ github.event.inputs.environment }}" | tr '[:upper:]' '[:lower:]')
+      FULL_APP_NAME="${{ vars.CONTAINER_APP_NAME }}-${ENV_SUFFIX}"
+      
+      echo "❌ Health check failed for $FULL_APP_NAME"
+      echo "🔄 Initiating automatic rollback..."
+      
+      # Get list of ALL revisions (including inactive ones) sorted by creation time (newest first)
+      echo "🔍 Fetching all revisions for $FULL_APP_NAME..."
+      REVISIONS=$(az containerapp revision list \
+        --name "$FULL_APP_NAME" \
+        --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+        --all \
+        --query "sort_by([].{name:name, createdTime:properties.createdTime, active:properties.active, trafficWeight:properties.trafficWeight}, &createdTime) | reverse(@)" \
+        --output json)
+      
+      # Debug: Show all revisions found
+      echo "📋 All revisions found:"
+      echo "$REVISIONS" | jq -r '.[] | "  - \(.name) | Active: \(.active) | Traffic: \(.trafficWeight)% | Created: \(.createdTime)"'
+      
+      # Count total revisions
+      REVISION_COUNT=$(echo "$REVISIONS" | jq 'length')
+      echo "📊 Total revisions found: $REVISION_COUNT"
+      
+      if [ "$REVISION_COUNT" -lt 1 ]; then
+        echo "⚠️ No revisions found at all! This is unexpected."
+        echo "ℹ️ Please check the container app manually in Azure Portal."
+        exit 1
+      fi
+      
+      # Get current active revision (the one that just failed)
+      CURRENT_REVISION=$(echo "$REVISIONS" | jq -r '.[0].name')
+      echo "📍 Current failed revision: $CURRENT_REVISION"
+      
+      # Get previous revision (second newest, regardless of active status)
+      PREVIOUS_REVISION=$(echo "$REVISIONS" | jq -r '.[1].name // empty')
+      
+      if [ -z "$PREVIOUS_REVISION" ]; then
+        echo "⚠️ No previous revision found to rollback to!"
+        echo "ℹ️ This is the first deployment - no previous version exists."
+        echo "📋 Available revisions:"
+        echo "$REVISIONS" | jq -r '.[] | "  - \(.name)"'
+        exit 1
+      fi
+      
+      echo "🔙 Rolling back to previous revision: $PREVIOUS_REVISION"
+      
+      # Check if current revision is active before deactivating
+      CURRENT_ACTIVE=$(echo "$REVISIONS" | jq -r --arg rev "$CURRENT_REVISION" '.[] | select(.name == $rev) | .active')
+      
+      if [ "$CURRENT_ACTIVE" = "true" ]; then
+        echo "🔴 Deactivating failed revision: $CURRENT_REVISION"
+        az containerapp revision deactivate \
+          --name "$FULL_APP_NAME" \
+          --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+          --revision "$CURRENT_REVISION"
+      else
+        echo "ℹ️ Current revision $CURRENT_REVISION is already deactivated (skipping)"
+      fi
+      
+      # Check if previous revision is already active
+      PREVIOUS_ACTIVE=$(echo "$REVISIONS" | jq -r --arg rev "$PREVIOUS_REVISION" '.[] | select(.name == $rev) | .active')
+      
+      if [ "$PREVIOUS_ACTIVE" = "false" ]; then
+        echo "✅ Activating previous revision: $PREVIOUS_REVISION"
+        az containerapp revision activate \
+          --name "$FULL_APP_NAME" \
+          --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+          --revision "$PREVIOUS_REVISION"
+      else
+        echo "ℹ️ Previous revision $PREVIOUS_REVISION is already active"
+      fi
+      
+      # Set 100% traffic to previous revision
+      echo "🔀 Routing 100% traffic to: $PREVIOUS_REVISION"
+      az containerapp ingress traffic set \
+        --name "$FULL_APP_NAME" \
+        --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+        --revision-weight "${PREVIOUS_REVISION}=100"
+      
+      echo "✅ Rollback completed successfully!"
+      echo "📊 Previous revision $PREVIOUS_REVISION is now active with 100% traffic"
+      
+      # Verify rollback health
+      echo "🔍 Verifying rollback health..."
+      sleep 15
+      
+      FQDN=$(az containerapp show \
+        --name "$FULL_APP_NAME" \
+        --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+        --query properties.configuration.ingress.fqdn \
+        --output tsv)
+      
+      HEALTH_URL="https://${FQDN}/${{ vars.HEALTH_CHECK }}"
+      HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL" || echo "000")
+      
+      ROLLBACK_HEALTHY=false
+      if [ "$HTTP_CODE" = "${{ vars.HEALTH_CHECK_EXPECTED_STATUS }}" ]; then
+        echo "✅ Rollback health check passed! Status: $HTTP_CODE"
+        echo "🎉 Application successfully rolled back to stable version"
+        ROLLBACK_HEALTHY=true
+      else
+        echo "⚠️ Rollback health check returned: $HTTP_CODE"
+        echo "⚠️ Manual intervention may be required"
+      fi
+      
+      # Create a detailed rollback summary
+      echo "## 🔄 Automatic Rollback Executed" >> $GITHUB_STEP_SUMMARY
+      echo "" >> $GITHUB_STEP_SUMMARY
+      echo "**Failed Revision:** \`$CURRENT_REVISION\`" >> $GITHUB_STEP_SUMMARY
+      echo "**Rolled Back To:** \`$PREVIOUS_REVISION\`" >> $GITHUB_STEP_SUMMARY
+      echo "**Reason:** Health check failed after deployment" >> $GITHUB_STEP_SUMMARY
+      echo "**Traffic:** 100% routed to previous stable revision" >> $GITHUB_STEP_SUMMARY
+      echo "" >> $GITHUB_STEP_SUMMARY
+      
+      if [ "$ROLLBACK_HEALTHY" = "true" ]; then
+        echo "**Rollback Status:** ✅ Successful - Application is healthy" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### ℹ️ Note" >> $GITHUB_STEP_SUMMARY
+        echo "The deployment failed but rollback was successful. The application is running on the previous stable version." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+        echo "1. Review deployment logs for the failed revision (\`$CURRENT_REVISION\`)" >> $GITHUB_STEP_SUMMARY
+        echo "2. Fix the issues in the code/configuration" >> $GITHUB_STEP_SUMMARY
+        echo "3. Re-run the deployment workflow" >> $GITHUB_STEP_SUMMARY
+      else
+        echo "**Rollback Status:** ⚠️ Completed but unhealthy (HTTP $HTTP_CODE)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🚨 Critical Issue Detected" >> $GITHUB_STEP_SUMMARY
+        echo "Both the new deployment AND the previous version are failing health checks!" >> $GITHUB_STEP_SUMMARY
+        echo "This indicates a systemic issue (infrastructure, database, configuration, secrets)." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### ⚠️ Important Note" >> $GITHUB_STEP_SUMMARY
+        echo "Secrets remain at the updated state. Review if configuration mismatch is causing issues." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Immediate Action Required" >> $GITHUB_STEP_SUMMARY
+        echo "1. Check application logs: \`az containerapp logs show -n $FULL_APP_NAME -g ${{ secrets.AZURE_RESOURCE_GROUP }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "2. Verify Azure Container Apps infrastructure health" >> $GITHUB_STEP_SUMMARY
+        echo "3. Check database connectivity and health" >> $GITHUB_STEP_SUMMARY
+        echo "4. Verify secrets/configuration alignment between GitHub and Azure" >> $GITHUB_STEP_SUMMARY
+        echo "5. Check for external dependencies (APIs, services) failures" >> $GITHUB_STEP_SUMMARY
+        echo "6. Review recent changes to shared infrastructure" >> $GITHUB_STEP_SUMMARY
+      fi
+      
+      # Exit with failure code to mark workflow as failed (deployment did not succeed)
+      echo ""
+      echo "❌ Workflow failed: Deployment was unsuccessful"
+      if [ "$ROLLBACK_HEALTHY" = "true" ]; then
+        echo "✅ Service availability: Maintained (rolled back to stable version)"
+      else
+        echo "⚠️ Service availability: Degraded (requires immediate attention)"
+      fi
+      exit 1
+      
+  # Step 7: Create GitHub issue for rollback notification
+  - name: Create GitHub issue for rollback notification
+    if: failure() && steps.health-check.outputs.healthy == 'false'
+    uses: actions/github-script@v7
+    with:
+      script: |
+        const envSuffix = '${{ github.event.inputs.environment }}'.toLowerCase();
+        const appName = `${{ vars.CONTAINER_APP_NAME }}-${envSuffix}`;
+        const sha = '${{ github.sha }}';
+        const runUrl = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+        
+        const body = `## 🚨 Automatic Rollback Triggered
+        
+        **Environment:** \`${{ github.event.inputs.environment }}\`
+        **Container App:** \`${appName}\`
+        **Failed Commit:** \`${sha}\`
+        **Workflow Run:** [View Details](${runUrl})
+        
+        ### What Happened?
+        The deployment passed all checks but failed the health check after going live. The system automatically rolled back to the previous stable version.
+        
+        ### Impact
+        - ⚠️ Deployment was unsuccessful
+        - ✅ Service was automatically restored to previous working version
+        - 🔒 No user-facing downtime expected
+        
+        ### Action Required
+        1. Review the [workflow logs](${runUrl})
+        2. Investigate the health check failure
+        3. Check application logs: \`az containerapp logs show -n ${appName} -g ${{ vars.AZURE_RESOURCE_GROUP }}\`
+        4. Verify configuration and secrets alignment
+        5. Fix the issue in the codebase
+        6. Re-run the deployment workflow
+        
+        ### Deployment Details
+        - **Branch:** ${{ github.event.inputs.branch_name }}
+        - **Image Tag:** ${{ github.sha }}
+        - **Failed Health Check:** \`${{ vars.HEALTH_CHECK }}\`
+        - **Expected Status:** \`${{ vars.HEALTH_CHECK_EXPECTED_STATUS }}\`
+        
+        ### Health Check Details
+        - **Endpoint:** \`https://<app-url>/${{ vars.HEALTH_CHECK }}\`
+        - **Max Retries:** 10
+        - **Retry Interval:** 10 seconds
+        - **Total Wait Time:** ~100 seconds
+        `;
+        
+        await github.rest.issues.create({
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          title: `🔄 Rollback: ${appName} deployment failed (${sha.substring(0,7)})`,
+          body: body,
+          labels: ['deployment-failure', 'auto-rollback', '${{ github.event.inputs.environment }}']
+        });
+        
+        console.log('✅ Rollback notification issue created successfully');
