@@ -19,7 +19,7 @@ Everything is parameterized so that you can override resource names, regions, VN
 
 - [Terraform](https://developer.hashicorp.com/terraform/downloads) v1.6+.
 - Azure subscription access (Subscription ID `07512706-3bc2-4200-9b89-5bce3249bddb`).
-- Azure CLI (`az`) logged in to the `LTIMindtree (ltimindtree.com)` directory.
+- Azure CLI (`az`) logged in to the `respective` directory.
 - An Azure AD service principal with permission to create resource groups, network resources, and VMs (see below).
 
 ## Quick start
@@ -28,12 +28,12 @@ Everything is parameterized so that you can override resource names, regions, VN
 2. **Create your input file** based on `terraform.tfvars.example`:
     - **Windows (PowerShell):**
        ```powershell
-       cd "c:/FDC CODE BASE/terraform/azure"
+       cd "/terraform/azure"
        copy terraform.tfvars.example terraform.tfvars
        ```
     - **Linux/macOS (bash):**
        ```bash
-       cd "~/FDC CODE BASE/terraform/azure"
+       cd "terraform/azure"
        cp terraform.tfvars.example terraform.tfvars
        ```
     Adjust values (resource group, region, CIDRs, tags, etc.) as needed. Leave `allowed_ssh_cidrs` empty to restrict SSH to the virtual network, or add explicit trusted ranges (e.g., `"203.0.113.4/32"`).
@@ -70,7 +70,7 @@ Terraform outputs the VM username (`soundar-rnd-01` by default) and an auto-gene
 If you previously enabled VM Insights from the Azure Portal, the VM may already have the **Azure Monitor Agent** and **Dependency Agent** extensions installed. Terraform cannot recreate an existing extension, so you must import it into state before running `terraform apply`. A helper script is included to streamline the process:
 
 ```powershell
-cd "c:/FDC CODE BASE/terraform/azure"
+cd "/terraform/azure"
 terraform init
 scripts/import-existing-vm-extensions.ps1 `
    -SubscriptionId "<subscription-guid>" `

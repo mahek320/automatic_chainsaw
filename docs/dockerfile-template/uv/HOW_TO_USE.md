@@ -45,10 +45,10 @@ Test-Path requirements.txt
 cd C:\path\to\your\python-service
 
 # Copy the UV Dockerfile
-Copy-Item "C:\FDC CODE BASE\Dockerfile-Template\uv\Dockerfile" .\Dockerfile
+Copy-Item "Dockerfile-Template\uv\Dockerfile" .\Dockerfile
 
 # Optional: Also copy .dockerignore from parent template
-Copy-Item "C:\FDC CODE BASE\Dockerfile-Template\.dockerignore" .\.dockerignore
+Copy-Item "Dockerfile-Template\.dockerignore" .\.dockerignore
 ```
 
 ### Step 2: Verify Your Project Structure
@@ -276,7 +276,7 @@ Get-Content uv.lock | Select-Object -First 20
 
 ```powershell
 # Copy lockfile Dockerfile
-Copy-Item "C:\FDC CODE BASE\Dockerfile-Template\uv\Dockerfile.lockfile" .\Dockerfile
+Copy-Item "Dockerfile-Template\uv\Dockerfile.lockfile" .\Dockerfile
 
 # Make sure uv.lock is in the same directory
 Test-Path uv.lock  # Should return True

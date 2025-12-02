@@ -358,7 +358,7 @@ az ad app federated-credential create \
   --parameters '{
     "name": "GitHub-Actions-Federated",
     "issuer": "https://token.actions.githubusercontent.com",
-    "subject": "repo:LTIM-Fosfor/gha-azcapp:environment:development",
+    "subject": "repo:<org-name>/gha-azcapp:environment:development",
     "audiences": ["api://AzureADTokenExchange"]
   }'
 

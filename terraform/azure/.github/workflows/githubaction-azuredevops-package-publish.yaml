@@ -36,7 +36,7 @@ jobs:
     uses: actions/checkout@v4
     with:
       ref: ${{ github.event.inputs.branch }}
-      repository: LTIM-Fosfor/gha-azcapp
+      repository: <org-name>/gha-azcapp
       fetch-depth: 1
       submodules: false
   - name: Azure Login
@@ -53,7 +53,7 @@ jobs:
       cd my-node-package
       sed -i "s|AZURE-DEVOPS-TOKEN|$AZURE_DEVOPS_TOKEN|" .npmrc
       npm publish
-      npm pack my-node-package@1.0.0 --registry=https://pkgs.dev.azure.com/FDC-Devops-internal/FDC-Project/_packaging/gha-azcapp-py-feed/npm/registry/
+      npm pack my-node-package@1.0.0 --registry=https://pkgs.dev.azure.com/<azure-devops>/<project>/_packaging/<package-name>/npm/registry/
   - name: Configure twine authentication using the token
     if: false
     run: |
@@ -61,10 +61,10 @@ jobs:
       echo -e "Index-servers = \n  gha-azcapp-py-feed" >> .pypirc
       echo "" >> .pypirc
       echo "[gha-azcapp-py-feed]" >> .pypirc
-      echo "Repository = https://pkgs.dev.azure.com/FDC-Devops-internal/FDC-Project/_packaging/gha-azcapp-py-feed/pypi/upload/" >> .pypirc
+      echo "Repository = https://pkgs.dev.azure.com/<azure-devops>/<project>/_packaging/<package-name>/pypi/upload/" >> .pypirc
       echo "username = AzureDevops" >> .pypirc
       echo "password = $AZURE_DEVOPS_TOKEN" >> .pypirc
       cd samplepkg
       python3 -m build
-      twine upload --config-file ../.pypirc -r gha-azcapp-py-feed dist/*
+      twine upload --config-file ../.pypirc -r <package-folder> dist/*
       echo "Package Uploaded Successfully"
