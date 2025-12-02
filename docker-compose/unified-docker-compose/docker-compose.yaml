@@ -142,7 +142,7 @@ services:
     ports:
       - "${CERBOS_PORT:-3592}:3592"
     volumes:
-      - ./cerbos-policies.yaml:/policies:ro
+      - ./cerbos-policies.yaml:/policies/ticket.yaml:ro
     networks:
       - app_network
 
