@@ -1,0 +1,90 @@
+name: Github Action Azure Artifacts Package Deployment
+
+permissions:
+  contents: read
+  id-token: write
+  actions: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: 'Enter the branch name'
+        required: true
+        default: 'main'
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: development
+        type: choice
+        options:
+          - development
+          - production
+
+env:
+  VERSION: ''
+
+jobs:
+  build-push:
+    name: Build, Push Artifact Package
+    runs-on: self-hosted
+    environment: ${{ github.event.inputs.environment }}
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      scan-results: ${{ steps.scan.outputs.results }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch_name }}
+          repository: ${{ github.repository }}
+          fetch-depth: 1
+          submodules: false
+
+      - name: Stamp build version
+        id: version
+        shell: bash
+        run: |
+          echo "VERSION=$(date +'%Y-%m-%d-%H-%M')" >> "$GITHUB_ENV"
+          echo "version=$(date +'%Y-%m-%d-%H-%M')" >> "$GITHUB_OUTPUT"
+
+      - name: Show build metadata
+        run: |
+          echo "Using version: $VERSION"
+          echo "Environment: ${{ github.event.inputs.environment }}"
+
+      - name: NPM Publish
+        id: build
+        env:
+          AZURE_DEVOPS_TOKEN: ${{ secrets.AZURE_ARTIFACT_PAT }}
+        shell: bash
+        run: |
+          cd my-node-package
+          sed -i "s|AZURE-DEVOPS-TOKEN|$AZURE_DEVOPS_TOKEN|" .npmrc
+          npm publish
+          npm pack my-node-package@1.0.0 --registry=https://pkgs.dev.azure.com/<org>/<project>/_packaging/<feed-name>/npm/registry/
+          echo "digest=$(sha256sum my-node-package-1.0.0.tgz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Configure twine authentication using the token
+        if: false
+        shell: bash
+        env:
+          AZURE_DEVOPS_TOKEN: ${{ secrets.AZURE_ARTIFACT_PAT }}
+        run: |
+          echo "[distutils]" > .pypirc
+          echo -e "Index-servers = \n  <feed-name>" >> .pypirc
+          echo "" >> .pypirc
+          echo "[<feed-name>]" >> .pypirc
+          echo "Repository = https://pkgs.dev.azure.com/<org>/<project>/_packaging/<feed-name>/pypi/upload/" >> .pypirc
+          echo "username = AzureDevOps" >> .pypirc
+          echo "password = $AZURE_DEVOPS_TOKEN" >> .pypirc
+          cd samplepkg
+          python3 -m build
+          twine upload --config-file ../.pypirc -r <feed-name> dist/*
+          echo "Package Uploaded Successfully"
+
+      - name: Scan placeholder
+        id: scan
+        shell: bash
+        run: |
+          echo "results=scan-not-configured" >> "$GITHUB_OUTPUT"
