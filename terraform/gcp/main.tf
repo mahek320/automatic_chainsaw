@@ -3,26 +3,23 @@ locals {
     "gke-private-nodes"
   ]
 
-  kubeconfig_path = var.kubeconfig_path != ""
-    ? var.kubeconfig_path
-    : "${path.module}/kubeconfig-${var.cluster_name}.yaml"
+  kubeconfig_path = var.kubeconfig_path != "" ? var.kubeconfig_path : "${path.module}/kubeconfig-${var.cluster_name}.yaml"
 
-  worker_pool_config = {
-    name = length(trimspace(try(var.cloud_build_worker_pool.name, ""))) > 0
-      ? trimspace(try(var.cloud_build_worker_pool.name, ""))
-      : "${var.cluster_name}-deploy-pool"
-    location = length(trimspace(try(var.cloud_build_worker_pool.location, ""))) > 0
-      ? trimspace(try(var.cloud_build_worker_pool.location, ""))
-      : var.region
-    machine_type = length(trimspace(try(var.cloud_build_worker_pool.machine_type, ""))) > 0
-      ? trimspace(try(var.cloud_build_worker_pool.machine_type, ""))
-      : "e2-standard-4"
-    disk_size_gb   = try(var.cloud_build_worker_pool.disk_size_gb, 100)
-    no_external_ip = try(var.cloud_build_worker_pool.no_external_ip, true)
-  }
+  #worker_pool_config = {
+  #name           = length(trimspace(try(var.cloud_build_worker_pool.name, ""))) > 0 ? trimspace(try(var.cloud_build_worker_pool.name, "")) : "${var.cluster_name}-deploy-pool"
+  #location       = length(trimspace(try(var.cloud_build_worker_pool.location, ""))) > 0 ? trimspace(try(var.cloud_build_worker_pool.location, "")) : var.region
+  #machine_type   = length(trimspace(try(var.cloud_build_worker_pool.machine_type, ""))) > 0 ? trimspace(try(var.cloud_build_worker_pool.machine_type, "")) : "e2-standard-4"
+  #disk_size_gb   = try(var.cloud_build_worker_pool.disk_size_gb, 100)
+  #no_external_ip = try(var.cloud_build_worker_pool.no_external_ip, true)
+  #}
 }
 
 data "google_client_config" "current" {}
+
+data "google_container_engine_versions" "asia_south1" {
+  location = var.region
+  project  = var.project_id
+}
 
 resource "google_compute_network" "primary" {
   name                    = var.vpc_name
@@ -84,7 +81,7 @@ resource "google_artifact_registry_repository" "docker" {
   format        = "DOCKER"
 
   labels = {
-    managed_by = "terraform"
+    managed_by  = "terraform"
     environment = "gke-private"
   }
 
@@ -104,7 +101,7 @@ resource "google_container_cluster" "primary" {
   remove_default_node_pool = true
   initial_node_count       = 1
 
-  min_master_version = var.gke_version
+  min_master_version = data.google_container_engine_versions.asia_south1.latest_master_version
 
   release_channel {
     channel = var.release_channel
@@ -148,7 +145,7 @@ resource "google_container_cluster" "primary" {
   }
 
   monitoring_config {
-    enable_components = ["SYSTEM_COMPONENTS", "WORKLOADS"]
+    enable_components = ["SYSTEM_COMPONENTS"]
   }
 
   deletion_protection = false
@@ -159,10 +156,10 @@ resource "google_container_cluster" "primary" {
 resource "google_container_node_pool" "cpu" {
   provider = google-beta
 
-  name       = var.cpu_node_pool.name
-  location   = var.region
-  cluster    = google_container_cluster.primary.name
-  project    = var.project_id
+  name     = var.cpu_node_pool.name
+  location = var.region
+  cluster  = google_container_cluster.primary.name
+  project  = var.project_id
 
   initial_node_count = var.cpu_node_pool.min_count
 
@@ -214,10 +211,10 @@ resource "google_container_node_pool" "cpu" {
 resource "google_container_node_pool" "gpu" {
   provider = google-beta
 
-  name       = var.gpu_node_pool.name
-  location   = var.region
-  cluster    = google_container_cluster.primary.name
-  project    = var.project_id
+  name     = var.gpu_node_pool.name
+  location = var.region
+  cluster  = google_container_cluster.primary.name
+  project  = var.project_id
 
   initial_node_count = var.gpu_node_pool.min_count
 
@@ -280,29 +277,9 @@ resource "local_file" "kubeconfig" {
     clusters = [{
       name = google_container_cluster.primary.name
       cluster = {
-        server                   = "https://${google_container_cluster.primary.endpoint}"
+        server                     = "https://${google_container_cluster.primary.endpoint}"
         certificate-authority-data = google_container_cluster.primary.master_auth[0].cluster_ca_certificate
       }
     }]
     contexts = [{
-      name = google_container_cluster.primary.name
-      context = {
-        cluster = google_container_cluster.primary.name
-        user    = google_container_cluster.primary.name
-      }
-    }]
-    "current-context" = google_container_cluster.primary.name
-    users = [{
-      name = google_container_cluster.primary.name
-      user = {
-        token = data.google_client_config.current.access_token
-      }
-    }]
-  })
-
-  depends_on = [
-    google_container_cluster.primary,
-    google_container_node_pool.cpu,
-    google_container_node_pool.gpu
-  ]
-}
+      n
